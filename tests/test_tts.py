@@ -84,9 +84,13 @@ def sessions(env) -> dict:
     return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
 
 
-def hook_log(env) -> str:
-    path = Path(env["CLAUDE_TTS_STATE_DIR"]) / "hook.log"
-    return path.read_text(encoding="utf-8") if path.exists() else ""
+def hook_log(env, name: str = "hook") -> str:
+    path = Path(env["CLAUDE_TTS_STATE_DIR"]) / f"{name}.log"
+    return path.read_text(encoding="utf-8", errors="replace") if path.exists() else ""
+
+
+def daemon_log(env) -> str:
+    return "daemon.log:\n" + hook_log(env, "daemon")[-4000:]
 
 
 # Units
@@ -118,7 +122,7 @@ def test_synthesizes_every_voice(voice):
 
 def test_session_start_launches_the_daemon(env):
     hook(env, "warm", {"session_id": "session-one", "cwd": "/work/one"})
-    assert wait_for(ready), "daemon never became ready"
+    assert wait_for(ready), daemon_log(env)
     health = call("/health")
     assert health["voices"] == tts_common.VOICES
     assert health["providers"][0] == "CPUExecutionProvider"
@@ -136,7 +140,9 @@ def test_stop_hook_speaks_in_the_session_voice(env):
     message = "Done.\n<!-- TTS_SUMMARY\nSession two is speaking.\nTTS_SUMMARY -->"
     hook(env, "stop", {"session_id": "session-two", "last_assistant_message": message})
     log = hook_log(env)
-    assert "reply (24 chars, bm_fable): {'ok': True, 'skipped': False}" in log, log
+    assert "reply (24 chars, bm_fable): {'ok': True, 'skipped': False}" in log, (
+        log + daemon_log(env)
+    )
 
 
 def test_parallel_session_starts_all_claim_a_voice(env):
@@ -175,7 +181,7 @@ def test_off_unloads_and_keeps_hooks_quiet(env):
 def test_on_brings_it_back(env):
     result = run(env, "tts_cli.py", "on")
     assert result.returncode == 0 and "TTS is on" in result.stdout, result
-    assert wait_for(ready), "daemon did not come back after on"
+    assert wait_for(ready), daemon_log(env)
     status = run(env, "tts_cli.py", "status")
     assert "TTS is on" in status.stdout and "running on CPU" in status.stdout, status
 

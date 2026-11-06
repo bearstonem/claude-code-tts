@@ -11,6 +11,7 @@ tts_hook.py talks to it over localhost:
   GET  /health    readiness, voices, execution providers, device
 """
 
+import faulthandler
 import json
 import os
 import queue
@@ -24,6 +25,12 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from tts_common import HERE, VOICES, download_model, load_config
+
+# stderr is daemon.log: a crash in native code (PortAudio, onnxruntime) leaves a
+# trace there, and so does a start-up that hangs (cancelled once the model is ready)
+faulthandler.enable()
+STARTUP_WATCHDOG = 90
+faulthandler.dump_traceback_later(STARTUP_WATCHDOG)
 
 CFG = load_config()
 CUDA = CFG["device"] == "cuda"
@@ -360,6 +367,7 @@ def load_in_background() -> None:
         return
     State.speaker = Speaker(model)
     State.ready.set()
+    faulthandler.cancel_dump_traceback_later()
     log(f"ready in {time.monotonic() - started:.1f}s, providers {model.providers}")
 
 
