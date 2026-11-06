@@ -1,4 +1,4 @@
-"""Settings, paths and logging shared by the TTS daemon, the hooks and the installer."""
+"""Settings, paths and logging shared by the TTS daemon, the hooks, the CLI and the installer."""
 
 import json
 import os
@@ -11,12 +11,23 @@ CONFIG_PATH = HERE / "config.json"
 LOG_DIR = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "claude-code-tts"
 MODEL_DIR = Path.home() / ".local" / "share" / "kokoro-tts"
 
+# kokoro: Kokoro-82M on a CUDA GPU. paradee: Paradee-8M (distilled from Kokoro) on the CPU.
+ENGINES = ("kokoro", "paradee")
+# Used when the configured voice is not one the engine has; Paradee has only four voices
+DEFAULT_VOICES = {"kokoro": "af_sky", "paradee": "af_heart"}
+
 DEFAULTS = {
+    # false keeps the hooks quiet; `claude-tts off` and `claude-tts on` flip it
+    "enabled": True,
+    "engine": "kokoro",
     "port": 7457,
-    # A GPU UUID (stable) or an nvidia-smi index; install.py fills in the 4090's UUID
+    # Kokoro only. A GPU UUID (stable) or an nvidia-smi index; install.py fills in the UUID
     "cuda_device": "0",
     "model": str(MODEL_DIR / "kokoro-v1.0.onnx"),
     "voices": str(MODEL_DIR / "voices-v1.0.bin"),
+    # Paradee only. Local model files (install.py fills these in); null downloads from Hugging Face
+    "paradee_model": None,
+    "paradee_config": None,
     "voice": "af_sky",
     "speed": 1.0,
     "volume": 1.0,
@@ -29,17 +40,40 @@ DEFAULTS = {
 MAX_LOG_BYTES = 1_000_000
 
 
+def read_config_file() -> dict:
+    """config.json as written, without defaults or environment overrides."""
+    try:
+        return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+
+
 def load_config() -> dict:
     cfg = dict(DEFAULTS)
     try:
-        cfg.update(json.loads(CONFIG_PATH.read_text(encoding="utf-8")))
-    except FileNotFoundError:
-        pass
+        cfg.update(read_config_file())
+    except ValueError as error:
+        # A typo in a hand-edited config must not crash every hook
+        log("hook", f"ignoring {CONFIG_PATH}: {error}")
     # Same variables as the upstream bash hooks, settable under "env" in settings.json
     if os.environ.get("KOKORO_VOICE"):
         cfg["voice"] = os.environ["KOKORO_VOICE"]
     if os.environ.get("KOKORO_SPEED"):
         cfg["speed"] = float(os.environ["KOKORO_SPEED"])
+    return cfg
+
+
+def save_config(changes: dict) -> dict:
+    """Merge changes into config.json and return the file's new contents.
+
+    Writes a temporary file and renames it over the old one, so a hook that
+    reads the config at the same moment never sees half a file.
+    """
+    cfg = read_config_file()
+    cfg.update(changes)
+    tmp = CONFIG_PATH.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
+    tmp.replace(CONFIG_PATH)
     return cfg
 
 

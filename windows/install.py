@@ -1,26 +1,39 @@
-"""Install the Windows/CUDA TTS hooks for Claude Code.
+"""Install the Windows TTS hooks for Claude Code.
 
-    uv run --project windows windows/install.py [--gpu 4090] [--voice af_sky]
+    uv run --project windows windows/install.py [--engine paradee] [--gpu 4090] [--voice af_heart]
 
-Pins the daemon to the named GPU, downloads the Kokoro model if needed, merges
-the hooks into ~/.claude/settings.json (backing it up first) and appends the
-TTS_SUMMARY instructions to ~/.claude/CLAUDE.md. Safe to re-run.
+Downloads the model for the chosen engine (Kokoro pinned to the named GPU, or
+Paradee on the CPU), writes config.json, merges the hooks into
+~/.claude/settings.json (backing it up first), appends the TTS_SUMMARY
+instructions to ~/.claude/CLAUDE.md and puts a `claude-tts` command in
+~/.local/bin. Safe to re-run; without --engine it keeps the configured one.
 """
 
 import argparse
 import json
+import os
 import re
 import shutil
 import subprocess
 import sys
-import time
 import urllib.request
 from pathlib import Path
 
-from tts_common import CONFIG_PATH, DEFAULTS, HERE, MODEL_DIR
+from tts_common import (
+    CONFIG_PATH,
+    DEFAULT_VOICES,
+    DEFAULTS,
+    ENGINES,
+    HERE,
+    MODEL_DIR,
+    read_config_file,
+    save_config,
+)
 
 CLAUDE_DIR = Path.home() / ".claude"
+BIN_DIR = Path.home() / ".local" / "bin"  # uv puts its own tools here, so it is usually on PATH
 MODEL_URL = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/"
+PARADEE_VERSION = "1.2"
 HOOK_EVENTS = {
     # event: (hook command, extra hook settings)
     "SessionStart": ("warm", {"async": True, "timeout": 10}),
@@ -71,7 +84,7 @@ def find_gpu(name: str) -> str:
     sys.exit(f"No GPU matching {name!r}; found {[g[1] for g in gpus]}")
 
 
-def download_models() -> None:
+def download_kokoro() -> None:
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
     for name in ("kokoro-v1.0.onnx", "voices-v1.0.bin"):
         target = MODEL_DIR / name
@@ -84,14 +97,49 @@ def download_models() -> None:
         part.replace(target)
 
 
-def write_config(gpu_uuid: str, voice: str | None) -> None:
-    cfg = dict(DEFAULTS)
-    if CONFIG_PATH.exists():
-        cfg.update(json.loads(CONFIG_PATH.read_text(encoding="utf-8")))
-    cfg["cuda_device"] = gpu_uuid
-    if voice:
-        cfg["voice"] = voice
-    CONFIG_PATH.write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
+def download_paradee() -> dict:
+    """Fetch Paradee's int8 model (8.5 MB) into the Hugging Face cache; its paths for config.json.
+
+    With the paths in the config the daemon starts without asking the Hub anything.
+    """
+    os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
+    from huggingface_hub import hf_hub_download
+    from paradee.tts import REPOS
+
+    repo, revision = REPOS[PARADEE_VERSION], f"v{PARADEE_VERSION}"
+    print(f"Fetching {repo} ({revision})...")
+    return {
+        "paradee_model": hf_hub_download(repo, "onnx/paradee_int8.onnx", revision=revision),
+        "paradee_config": hf_hub_download(repo, "config.json", revision=revision),
+    }
+
+
+def engine_voices(engine: str, cfg: dict) -> list[str] | None:
+    """The voices an engine has, or None if its files are not there to ask."""
+    if engine == "paradee":
+        from paradee import VOICES
+
+        return VOICES[PARADEE_VERSION]
+    if not Path(cfg["voices"]).exists():
+        return None
+    import numpy as np
+
+    return sorted(np.load(cfg["voices"]).keys())
+
+
+def fit_voice(engine: str, voice: str, cfg: dict) -> str:
+    """voice if the engine has it, else the engine's default (Paradee has only four)."""
+    voices = engine_voices(engine, cfg)
+    if voices is None or voice in voices:
+        return voice
+    fallback = DEFAULT_VOICES[engine]
+    print(f"{engine} has no voice {voice!r}; using {fallback!r} (it has {', '.join(voices)})")
+    return fallback
+
+
+def write_config(changes: dict) -> None:
+    # Fill in every default so new settings show up in the file for editing
+    save_config({**DEFAULTS, **read_config_file(), **changes})
     print(f"Config: {CONFIG_PATH}")
 
 
@@ -145,30 +193,59 @@ def install_claude_md() -> None:
     print(f"TTS instructions: {path}")
 
 
-def restart_daemon_and_test() -> None:
+def install_cli() -> None:
+    """`claude-tts` for cmd and PowerShell (.cmd) and for Git Bash (no extension)."""
+    python = HERE / ".venv" / "Scripts" / "python.exe"
+    cli = HERE / "tts_cli.py"
+    BIN_DIR.mkdir(parents=True, exist_ok=True)
+    (BIN_DIR / "claude-tts.cmd").write_text(f'@"{python}" "{cli}" %*\r\n', encoding="utf-8")
+    sh = f'#!/bin/sh\nexec "{python.as_posix()}" "{cli.as_posix()}" "$@"\n'
+    (BIN_DIR / "claude-tts").write_bytes(sh.encode())
+    print(f"Command: {BIN_DIR / 'claude-tts'} (on, off, status, engine, voice, restart)")
+    on_path = any(
+        Path(entry).resolve() == BIN_DIR.resolve()
+        for entry in os.environ.get("PATH", "").split(os.pathsep)
+        if entry
+    )
+    if not on_path:
+        print(f"  {BIN_DIR} is not on PATH; add it to run claude-tts from anywhere")
+
+
+def restart_daemon_and_test(engine: str) -> None:
     sys.path.insert(0, str(HERE))
     import tts_hook
 
-    if tts_hook.request("/shutdown", {}, timeout=2) is not None:
-        time.sleep(1)  # let the old daemon release the port
-    tts_hook.start_daemon()
-    if not tts_hook.wait_ready(90):
+    if not tts_hook.restart_daemon(90):
         sys.exit("Daemon did not start; see %LOCALAPPDATA%\\claude-code-tts\\daemon.log")
     print(f"Daemon: {tts_hook.request('/health')}")
-    tts_hook.speak("Text to speech is set up on the forty ninety.")
+    tts_hook.speak(f"Text to speech is set up with {engine.capitalize()}.")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--gpu", default="4090", help="substring of the GPU name")
-    parser.add_argument("--voice", help="Kokoro voice, e.g. af_sky, af_heart, bm_george")
+    parser.add_argument(
+        "--engine",
+        choices=ENGINES,
+        help="kokoro (Kokoro-82M on a CUDA GPU) or paradee (Paradee-8M on the CPU); "
+        "default: the configured engine",
+    )
+    parser.add_argument("--gpu", default="4090", help="Kokoro: substring of the GPU name")
+    parser.add_argument("--voice", help="e.g. af_heart, bf_isabella, am_puck, bm_fable")
     args = parser.parse_args()
-    gpu_uuid = find_gpu(args.gpu)
-    download_models()
-    write_config(gpu_uuid, args.voice)
+    cfg = {**DEFAULTS, **read_config_file()}
+    engine = args.engine or cfg["engine"]
+    changes: dict = {"engine": engine}
+    if engine == "kokoro":
+        changes["cuda_device"] = find_gpu(args.gpu)
+        download_kokoro()
+    else:
+        changes.update(download_paradee())
+    changes["voice"] = fit_voice(engine, args.voice or cfg["voice"], cfg)
+    write_config(changes)
     install_hooks()
     install_claude_md()
-    restart_daemon_and_test()
+    install_cli()
+    restart_daemon_and_test(engine)
     print("Done. Restart Claude Code sessions to load the hooks.")
 
 

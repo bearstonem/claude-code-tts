@@ -2,3 +2,4 @@
 __pycache__/
 # machine specific: GPU UUID and model paths, written by install.py
 config.json
+config.json.tmp

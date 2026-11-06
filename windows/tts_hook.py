@@ -8,6 +8,7 @@
 
 Hooks never print to stdout (SessionStart and UserPromptSubmit output would be added
 to Claude's context) and always exit 0, so a TTS problem can never block Claude Code.
+While "enabled" is false in config.json (`claude-tts off`) they speak nothing.
 """
 
 import json
@@ -101,7 +102,22 @@ def wait_ready(timeout: float) -> bool:
     return False
 
 
-def speak(text: str, narration: bool = False) -> None:
+def restart_daemon(timeout: float = 90) -> bool:
+    """Stop a running daemon, start a fresh one and wait until its model is loaded."""
+    if request("/shutdown", {}, timeout=2) is not None:
+        # Wait for the old daemon to release the port, or the new one cannot bind
+        deadline = time.monotonic() + 10
+        while request("/health", timeout=0.5) is not None and time.monotonic() < deadline:
+            time.sleep(0.2)
+    start_daemon()
+    return wait_ready(timeout)
+
+
+def speak(text: str, narration: bool = False, voice: str | None = None) -> None:
+    # Read the switch again: `claude-tts off` may have run while this hook waited
+    # for the transcript, and starting the daemon now would undo it
+    if not load_config()["enabled"]:
+        return
     if request("/health", timeout=1) is None:
         start_daemon()
     if not wait_ready(90):
@@ -109,7 +125,7 @@ def speak(text: str, narration: bool = False) -> None:
         return
     payload = {
         "text": text[: CFG["max_chars"]],
-        "voice": CFG["voice"],
+        "voice": voice or CFG["voice"],
         "speed": CFG["speed"],
         # Lets the daemon drop this request if a newer one or a stop overtook it
         "requested_at": STARTED_AT,
@@ -238,6 +254,8 @@ HANDLERS = {
     "interrupt": on_silence,
     "end": on_silence,
 }
+# Hooks that would start the daemon or speak; skipped while TTS is turned off
+SPEAKING = {"warm", "stop", "pretool"}
 
 
 def main() -> int:
@@ -245,6 +263,8 @@ def main() -> int:
     handler = HANDLERS.get(command)
     if handler is None:
         log(f"unknown command {command!r}")
+        return 0
+    if command in SPEAKING and not CFG["enabled"]:
         return 0
     try:
         raw = sys.stdin.buffer.read() if sys.stdin else b""
