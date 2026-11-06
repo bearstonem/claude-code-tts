@@ -4,8 +4,8 @@
 
 DUCK_LEVEL="${DUCK_LEVEL:-5}"  # Duck to 5% by default (0-100 scale)
 MIN_DUCK_VOLUME="${MIN_DUCK_VOLUME:-5}"  # Never go below this volume
-VOLUME_FILE="/tmp/kokoro-music-volumes.txt"
-LOG_FILE="/tmp/kokoro-hook.log"
+VOLUME_FILE="${TMPDIR:-/tmp}/claude-tts-music-volumes.txt"
+LOG_FILE="${TMPDIR:-/tmp}/claude-tts-duck.log"
 
 log() {
     echo "[$(date)] [audio-duck] $1" >> "$LOG_FILE"

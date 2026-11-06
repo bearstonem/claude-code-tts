@@ -1,2 +1,7 @@
 __pycache__/
 .ruff_cache/
+.pytest_cache/
+.venv/
+# Machine-specific settings, written by install.py
+config.json
+config.json.tmp

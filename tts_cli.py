@@ -1,30 +1,27 @@
-"""claude-tts: turn Claude Code's speech on and off, and pick the engine and voice.
+"""claude-tts: turn Claude Code's speech on and off, and pick its voice.
 
   claude-tts off            stop talking now and stay quiet (also unloads the model)
   claude-tts on             talk again
   claude-tts toggle         flip between on and off
-  claude-tts status         what is configured and what the daemon is running (default)
-  claude-tts engine [NAME]  show or switch the engine: kokoro (GPU) or paradee (CPU)
+  claude-tts status         what is configured and what the daemon is doing (default)
   claude-tts voice [NAME]   list the voices, or switch to one and hear it
   claude-tts sessions [on|off]
-                            give each Claude Code session its own voice, or
-                            list the sessions and their voices
+                            give each Claude Code session its own voice (the
+                            default), or list the sessions and their voices
   claude-tts restart        restart the daemon, e.g. after editing config.json
 
 Changes apply to every Claude Code session at once; nothing needs restarting.
 Inside Claude Code, run them with a leading "!", e.g. `! claude-tts off`.
+To run on an NVIDIA GPU instead of the CPU: `uv run install.py --gpu`.
 """
 
 import argparse
 import sys
-import textwrap
 import time
-from pathlib import Path
 
-import install
 import tts_hook as hook
 import tts_sessions
-from tts_common import CONFIG_PATH, ENGINES, LOG_DIR, load_config, save_config
+from tts_common import CONFIG_PATH, LOG_DIR, VOICES, load_config, save_config
 
 DAEMON_LOG = LOG_DIR / "daemon.log"
 
@@ -39,19 +36,23 @@ def health() -> dict | None:
     return reply if reply and "ready" in reply else None
 
 
+def device(cfg: dict) -> str:
+    return "GPU" if cfg["device"] == "cuda" else "CPU"
+
+
 def cmd_on(args) -> int:
     save_config({"enabled": True})
     cfg = load_config()
     if health() is None:
         hook.start_daemon()  # loads in the background; the next reply waits for it
-    print(f"TTS is on ({cfg['engine']}, voice {cfg['voice']}).")
+    print(f"TTS is on (voice {cfg['voice']}, {device(cfg)}).")
     return 0
 
 
 def cmd_off(args) -> int:
     save_config({"enabled": False})
     hook.request("/stop", {}, timeout=1)
-    # Unload the model too (frees the GPU memory Kokoro holds); `on` brings it back
+    # Unload the model too, freeing its memory; `on` brings it back
     hook.request("/shutdown", {}, timeout=1)
     print("TTS is off. `claude-tts on` turns it back on.")
     return 0
@@ -64,7 +65,7 @@ def cmd_toggle(args) -> int:
 def cmd_status(args) -> int:
     cfg = load_config()
     print(f"TTS is {'on' if cfg['enabled'] else 'off'}")
-    print(f"engine  {cfg['engine']}, voice {cfg['voice']}, speed {cfg['speed']}")
+    print(f"voice   {cfg['voice']}, speed {cfg['speed']}, on the {device(cfg)}")
     if cfg["voice_per_session"]:
         print(f"voices  one per session: {', '.join(tts_sessions.rotation(cfg))}")
     state = health()
@@ -72,63 +73,26 @@ def cmd_status(args) -> int:
         when = " (starts with the next reply)" if cfg["enabled"] else ""
         print(f"daemon  not running{when}")
     elif not state["ready"]:
-        print(f"daemon  pid {state['pid']}, loading {state.get('engine', '')}")
+        print(f"daemon  pid {state['pid']}, loading the model")
     else:
         where = (state.get("providers") or ["?"])[0].replace("ExecutionProvider", "")
         speaking = ", speaking" if state.get("speaking") else ""
-        print(f"daemon  pid {state['pid']}, {state.get('engine')} on {where}{speaking}")
-        if state.get("engine") != cfg["engine"]:
-            print(f"        config.json says {cfg['engine']}; `claude-tts restart` switches")
+        print(f"daemon  pid {state['pid']}, running on {where}{speaking}")
+        if state.get("device") != cfg["device"]:
+            print(f"        config.json says {cfg['device']}; `claude-tts restart` switches")
     print(f"config  {CONFIG_PATH}")
     return 0
 
 
-def cmd_engine(args) -> int:
-    cfg = load_config()
-    if not args.name:
-        print(f"{cfg['engine']} (choose from {', '.join(ENGINES)})")
-        return 0
-    name = args.name
-    changes: dict = {"engine": name}
-    if name == "kokoro" and not Path(cfg["model"]).exists():
-        return fail(f"Kokoro is not downloaded; run: uv run --project {install.HERE} "
-                    f"{install.HERE / 'install.py'} --engine kokoro")
-    if name == "paradee" and not (cfg["paradee_model"] and Path(cfg["paradee_model"]).exists()):
-        changes.update(install.download_paradee())
-    changes["voice"] = install.fit_voice(name, cfg["voice"], cfg)
-    save_config(changes)
-    if not cfg["enabled"]:
-        print(f"Engine: {name}. TTS is off; `claude-tts on` to hear it.")
-        return 0
-    print(f"Engine: {name}. Restarting the daemon...")
-    if not hook.restart_daemon(90):
-        return fail(f"The daemon did not start; see {DAEMON_LOG}")
-    hook.speak(f"Now speaking with {name.capitalize()}.", voice=changes["voice"])
-    return 0
-
-
-def known_voices(cfg: dict) -> list[str] | None:
-    state = health()
-    if state and state["ready"] and state.get("engine") == cfg["engine"]:
-        return state["voices"]
-    return install.engine_voices(cfg["engine"], cfg)
-
-
 def cmd_voice(args) -> int:
     cfg = load_config()
-    voices = known_voices(cfg)
     if not args.name:
-        print(f"{cfg['voice']} ({cfg['engine']})")
-        if voices:
-            print(textwrap.fill(", ".join(voices), width=78, initial_indent="  ",
-                                subsequent_indent="  "))
+        print(f"{cfg['voice']} (voices: {', '.join(VOICES)})")
         return 0
-    if voices is not None and args.name not in voices:
-        return fail(f"{cfg['engine']} has no voice {args.name!r}; it has {', '.join(voices)}")
     save_config({"voice": args.name})
     print(f"Voice: {args.name}")
     if cfg["voice_per_session"]:
-        print("  (for new sessions first in line; running sessions keep theirs)")
+        print("  (first in line for new sessions; running sessions keep theirs)")
     if cfg["enabled"]:
         # af_heart -> "Heart", bm_fable -> "Fable"
         hook.speak(f"Hi, I'm {args.name.split('_', 1)[-1].capitalize()}.", voice=args.name)
@@ -172,7 +136,6 @@ COMMANDS = {
     "off": (cmd_off, "stop talking now and stay quiet"),
     "toggle": (cmd_toggle, "flip between on and off"),
     "status": (cmd_status, "show what is configured and running"),
-    "engine": (cmd_engine, "show or switch the engine"),
     "voice": (cmd_voice, "list the voices, or switch to one"),
     "sessions": (cmd_sessions, "one voice per Claude Code session (on/off), or list them"),
     "restart": (cmd_restart, "restart the daemon"),
@@ -189,10 +152,8 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", metavar="command")
     for name, (_, help_text) in COMMANDS.items():
         cmd = sub.add_parser(name, help=help_text)
-        if name == "engine":
-            cmd.add_argument("name", nargs="?", choices=ENGINES)
-        elif name == "voice":
-            cmd.add_argument("name", nargs="?")
+        if name == "voice":
+            cmd.add_argument("name", nargs="?", choices=VOICES)
         elif name == "sessions":
             cmd.add_argument("state", nargs="?", choices=("on", "off"))
     args = parser.parse_args(argv)

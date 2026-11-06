@@ -1,0 +1,50 @@
+name: test
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: PortAudio (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libportaudio2
+      - run: uv sync --locked
+      - run: uv run ruff check .
+      - run: uv run pytest -v
+      # The runner is throwaway, so install for real: hooks, CLAUDE.md, command, daemon
+      - name: Install
+        run: uv run install.py
+      - name: claude-tts
+        shell: bash
+        run: |
+          ~/.local/bin/claude-tts status
+          ~/.local/bin/claude-tts off
+          ~/.local/bin/claude-tts on
+          ~/.local/bin/claude-tts sessions
+          grep -q tts_hook.py ~/.claude/settings.json
+          grep -q TTS_SUMMARY ~/.claude/CLAUDE.md
+      - name: Uninstall
+        shell: bash
+        run: |
+          uv run install.py --uninstall
+          ! grep -q tts_hook.py ~/.claude/settings.json
+          test ! -e ~/.local/bin/claude-tts
+      - name: Logs
+        if: always()
+        shell: bash
+        run: |
+          for dir in ~/.local/state/claude-code-tts "$LOCALAPPDATA/claude-code-tts"; do
+            for f in "$dir"/*.log; do [ -f "$f" ] && { echo "== $f"; cat "$f"; }; done
+          done
+          true

@@ -1,0 +1,33 @@
+# Optional NVIDIA GPU runtime for the TTS daemon, set up by `uv run install.py --gpu`.
+#
+# It is a separate environment because onnxruntime (CPU, which Paradee depends on)
+# and onnxruntime-gpu install into the same package directory, so one environment
+# cannot hold both. Only the daemon runs here; the hooks and the CLI keep using
+# the main environment. Paradee is small enough that the CPU is plenty; the GPU
+# only takes that work off the CPU.
+[project]
+name = "claude-code-tts-gpu"
+version = "0.2.0"
+description = "NVIDIA GPU runtime for the claude-code-tts daemon"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "paradee",
+    "en-core-web-sm",
+    "sounddevice>=0.5.6",
+    # Brings CUDA and cuDNN as pip wheels, so no CUDA toolkit is needed
+    "onnxruntime-gpu[cuda,cudnn]>=1.31.0",
+]
+
+[tool.uv]
+package = false
+# Drop the CPU wheel Paradee asks for; onnxruntime-gpu provides the same module
+override-dependencies = ["onnxruntime; sys_platform == 'never'"]
+required-environments = [
+    "sys_platform == 'win32' and platform_machine == 'AMD64'",
+    "sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
+
+# Keep these two in step with ../pyproject.toml
+[tool.uv.sources]
+paradee = { git = "https://github.com/sahilmahendrakar/paradee", rev = "c2789ef9abf54a9384eef89cc7de3f1afe5ad01d" }
+en-core-web-sm = { url = "https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl" }

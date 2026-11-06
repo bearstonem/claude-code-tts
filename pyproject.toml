@@ -1,23 +1,47 @@
 [project]
 name = "claude-code-tts"
-version = "0.1.0"
-description = "Kokoro TTS Hook for Claude Code"
+version = "0.2.0"
+description = "Claude Code reads its replies aloud with Paradee, a small text-to-speech model that runs on the CPU"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12,<3.13"
 license = "ISC"
 dependencies = [
+    # Paradee-8M v1.2 text-to-speech; not on PyPI, pinned to a commit below.
+    # It brings the CPU onnxruntime; the GPU runtime lives in gpu/ (install.py --gpu).
+    "paradee",
+    # misaki (Paradee's phonemizer) runs `pip install` for this spaCy model on first
+    # use, which fails in a uv venv; install it up front instead
+    "en-core-web-sm",
+    "sounddevice>=0.5.6",
     "mistune>=3.0.0",
 ]
 
 [dependency-groups]
 dev = [
-    "pre-commit>=4.0.0",
     "pytest>=8.0.0",
     "ruff>=0.8.0",
 ]
 
+[tool.uv]
+package = false
+# Fail the lock if any of these could not install (wheels for every dependency)
+required-environments = [
+    "sys_platform == 'win32' and platform_machine == 'AMD64'",
+    "sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "sys_platform == 'linux' and platform_machine == 'aarch64'",
+    "sys_platform == 'darwin' and platform_machine == 'arm64'",
+]
+
+# Keep these two in step with gpu/pyproject.toml
+[tool.uv.sources]
+paradee = { git = "https://github.com/sahilmahendrakar/paradee", rev = "c2789ef9abf54a9384eef89cc7de3f1afe5ad01d" }
+en-core-web-sm = { url = "https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl" }
+
 [tool.ruff]
-line-length = 88
+line-length = 100
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "W"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

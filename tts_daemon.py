@@ -1,13 +1,14 @@
-"""TTS daemon for Claude Code: Kokoro on one CUDA GPU, or Paradee on the CPU.
+"""Text-to-speech daemon for Claude Code, speaking with Paradee-8M.
 
 Loads the model once, keeps it resident and plays speech on the output device.
-config.json's "engine" picks the model. tts_hook.py talks to it over localhost:
+It runs on the CPU; with "device": "cuda" (install.py --gpu) on an NVIDIA GPU.
+tts_hook.py talks to it over localhost:
 
   POST /speak     {"text": ..., "voice": ..., "speed": ..., "session": ...}
                   replaces whatever is playing
   POST /stop      silences playback; with {"session": ...} only that session's
   POST /shutdown  exits the daemon (the next hook starts a fresh one)
-  GET  /health    readiness, engine, voices, execution providers, pinned device
+  GET  /health    readiness, voices, execution providers, device
 """
 
 import json
@@ -16,45 +17,35 @@ import queue
 import re
 import socket
 import socketserver
+import subprocess
 import sys
 import threading
 import time
-from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Callable
 
-from tts_common import DEFAULT_VOICES, ENGINES, load_config
+from tts_common import HERE, VOICES, download_model, load_config
 
 CFG = load_config()
-ENGINE = CFG["engine"] if CFG["engine"] in ENGINES else "kokoro"
+CUDA = CFG["device"] == "cuda"
 
-if ENGINE == "kokoro":
-    # Pin before onnxruntime touches CUDA. PCI bus order makes indices match nvidia-smi
-    # (CUDA's default is fastest-first, which would put the 5090 at 0); UUIDs need no order.
+if CUDA:
+    # Pin before onnxruntime touches CUDA. PCI bus order makes indices match
+    # nvidia-smi (CUDA's default is fastest first); UUIDs need no order.
     os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-    os.environ["CUDA_VISIBLE_DEVICES"] = str(CFG["cuda_device"])
+    if CFG["cuda_device"] is not None:
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(CFG["cuda_device"])
 # Windows without Developer Mode cannot symlink; the Hub cache copies instead, which is fine
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
 
 import numpy as np  # noqa: E402
 import sounddevice as sd  # noqa: E402
+from paradee import SAMPLE_RATE, Paradee  # noqa: E402
 
-SAMPLE_RATE = 24000  # Kokoro and Paradee both produce 24 kHz mono
 BLOCK = SAMPLE_RATE // 10  # write audio in 100 ms blocks so /stop takes effect quickly
 GAP = np.zeros(SAMPLE_RATE // 4, dtype=np.float32)  # pause after each synthesized chunk
 SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
-# Kokoro voice names start with a letter for their language
-LANGS = {
-    "a": "en-us",
-    "b": "en-gb",
-    "e": "es",
-    "f": "fr-fr",
-    "h": "hi",
-    "i": "it",
-    "j": "ja",
-    "p": "pt-br",
-    "z": "cmn",
-}
+DUCK_SCRIPT = HERE / "scripts" / "audio-duck.sh"
+DUCK = sys.platform == "darwin" and bool(CFG["duck_music"]) and DUCK_SCRIPT.exists()
 
 
 def log(message: str) -> None:
@@ -62,65 +53,68 @@ def log(message: str) -> None:
     print(f"[{stamp}] {message}", file=sys.stderr, flush=True)
 
 
-@dataclass
-class Engine:
-    name: str
-    # (text, voice, speed) -> float32 audio at SAMPLE_RATE
-    create: Callable[[str, str, float], np.ndarray]
-    voices: list[str]
-    providers: list[str]
+class Model:
+    """Paradee, loaded once; create() turns text into float32 audio at SAMPLE_RATE."""
+
+    def __init__(self):
+        if CFG["model"] and CFG["model_config"]:
+            model_path, config_path = CFG["model"], CFG["model_config"]
+        else:
+            model_path, config_path = download_model(gpu=CUDA)
+        self.paradee = Paradee(
+            model_path=model_path, config_path=config_path, threads=int(CFG["threads"])
+        )
+        if CUDA:
+            self._use_cuda(model_path)
+        self.voices: list[str] = list(self.paradee.voices)
+        self.providers: list[str] = self.paradee.session.get_providers()
+
+    def _use_cuda(self, model_path: str) -> None:
+        """Swap Paradee's CPU-only session for a CUDA one, built the same way."""
+        import onnxruntime as rt
+
+        # Paradee adds the per-token durations as a graph output when it loads;
+        # its _run() reads them, so the CUDA session needs the same graph
+        from paradee.tts import DURATIONS, _with_output
+
+        if hasattr(rt, "preload_dlls"):
+            rt.preload_dlls()  # CUDA and cuDNN libraries from the nvidia-* wheels
+        rt.set_default_logger_severity(3)
+        options = rt.SessionOptions()
+        options.log_severity_level = 3
+        with open(model_path, "rb") as fp:
+            graph = _with_output(fp.read(), DURATIONS)
+        self.paradee.session = rt.InferenceSession(
+            graph,
+            options,
+            providers=[("CUDAExecutionProvider", {"device_id": 0}), "CPUExecutionProvider"],
+        )
+        if self.paradee.session.get_providers()[0] != "CUDAExecutionProvider":
+            log(f"WARNING: CUDA unavailable, running on {self.paradee.session.get_providers()}")
+
+    def create(self, text: str, voice: str, speed: float) -> np.ndarray:
+        # Paradee picks American or British phonemes from the voice name itself
+        return self.paradee(text, speed=speed, voice=voice)
 
     def pick_voice(self, voice: str) -> str:
-        if voice in self.voices:
-            return voice
-        fallback = DEFAULT_VOICES[self.name]
-        return fallback if fallback in self.voices else self.voices[0]
+        return voice if voice in self.voices else VOICES[0]
 
 
-def load_kokoro() -> Engine:
-    import onnxruntime as rt
-    from kokoro_onnx import Kokoro
-
-    rt.preload_dlls()  # CUDA and cuDNN DLLs from the nvidia-* wheels
-    rt.set_default_logger_severity(3)
-    options = rt.SessionOptions()
-    options.log_severity_level = 3
-    session = rt.InferenceSession(
-        CFG["model"],
-        options,
-        providers=[("CUDAExecutionProvider", {"device_id": 0}), "CPUExecutionProvider"],
-    )
-    if session.get_providers()[0] != "CUDAExecutionProvider":
-        log(f"WARNING: CUDA unavailable, running on {session.get_providers()}")
-    kokoro = Kokoro.from_session(session, CFG["voices"])
-
-    def create(text: str, voice: str, speed: float) -> np.ndarray:
-        audio, _ = kokoro.create(text, voice=voice, speed=speed, lang=LANGS.get(voice[0], "en-us"))
-        return audio
-
-    return Engine("kokoro", create, kokoro.get_voices(), session.get_providers())
+def load_model() -> Model:
+    model = Model()
+    # The first run loads the phonemizer for the voice's accent and, on a GPU,
+    # allocates memory and picks kernels; do it before real speech
+    model.create("Warm up.", model.pick_voice(CFG["voice"]), 1.0)
+    return model
 
 
-def load_paradee() -> Engine:
-    # Paradee runs its int8 model on onnxruntime's CPU provider; it is about 30x
-    # faster than real time there, so it needs no GPU
-    from paradee import Paradee
-
-    model = Paradee(model_path=CFG["paradee_model"], config_path=CFG["paradee_config"])
-
-    def create(text: str, voice: str, speed: float) -> np.ndarray:
-        # Paradee picks American or British phonemes from the voice name itself
-        return model(text, speed=speed, voice=voice)
-
-    return Engine("paradee", create, list(model.voices), model.session.get_providers())
-
-
-def load_model() -> Engine:
-    engine = load_paradee() if ENGINE == "paradee" else load_kokoro()
-    # The first run allocates memory and picks kernels (Kokoro) or loads the
-    # phonemizer for the voice's accent (Paradee); do it before real speech
-    engine.create("Warm up.", engine.pick_voice(CFG["voice"]), 1.0)
-    return engine
+def duck(action: str) -> None:
+    """macOS: lower Apple Music while speaking ("duck"), then put it back ("restore")."""
+    if DUCK:
+        try:
+            subprocess.run(["bash", str(DUCK_SCRIPT), action], timeout=5, check=False)
+        except (OSError, subprocess.TimeoutExpired) as error:
+            log(f"audio-duck {action} failed: {error!r}")
 
 
 def chunks(text: str, first: int = 150, rest: int = 400) -> list[str]:
@@ -156,8 +150,8 @@ def output_device() -> int | None:
 class Speaker:
     """Plays one utterance at a time; a newer request or a stop cancels the current one."""
 
-    def __init__(self, engine: Engine):
-        self.engine = engine
+    def __init__(self, model: Model):
+        self.model = model
         self.generation = 0
         self.speaking = False
         self.last_speak = 0.0
@@ -221,7 +215,7 @@ class Speaker:
                 break
             try:
                 with self.synth_lock:
-                    audio = self.engine.create(chunk, voice, speed)
+                    audio = self.model.create(chunk, voice, speed)
             except Exception as error:  # e.g. a chunk that yields no phonemes
                 log(f"synthesis failed for {chunk[:60]!r}: {error}")
                 continue
@@ -247,6 +241,7 @@ class Speaker:
                     device=output_device(),
                 ) as stream:
                     self.speaking = True
+                    duck("duck")
                     while (audio := audio_chunks.get()) is not None:
                         for start in range(0, len(audio), BLOCK):
                             if not self._live(generation):
@@ -257,6 +252,8 @@ class Speaker:
             except Exception as error:
                 log(f"playback failed: {error!r}")
             finally:
+                if self.speaking:
+                    duck("restore")
                 self.speaking = False
 
 
@@ -271,16 +268,16 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path != "/health":
             return self._reply(404, {"error": "not found"})
-        engine = State.speaker.engine if State.speaker else None
+        model = State.speaker.model if State.speaker else None
         self._reply(
             200,
             {
                 "ready": State.ready.is_set(),
                 "speaking": bool(State.speaker and State.speaker.speaking),
-                "engine": ENGINE,
-                "voices": engine.voices if engine else [],
-                "providers": engine.providers if engine else [],
-                "cuda_device": CFG["cuda_device"] if ENGINE == "kokoro" else None,
+                "device": "cuda" if CUDA else "cpu",
+                "cuda_device": CFG["cuda_device"] if CUDA else None,
+                "voices": model.voices if model else [],
+                "providers": model.providers if model else [],
                 "pid": os.getpid(),
             },
         )
@@ -309,12 +306,11 @@ class Handler(BaseHTTPRequestHandler):
         if not text:
             return self._reply(400, {"error": "empty text"})
         wanted = str(body.get("voice") or CFG["voice"])
-        # A voice the engine lacks (say af_sky after switching to Paradee) falls
-        # back to its default rather than going silent
-        voice = State.speaker.engine.pick_voice(wanted)
+        # An unknown voice (a typo in config.json) falls back rather than going silent
+        voice = State.speaker.model.pick_voice(wanted)
         if voice != wanted and wanted not in State.unknown_voices:
             State.unknown_voices.add(wanted)
-            log(f"{ENGINE} has no voice {wanted!r}, using {voice!r}")
+            log(f"no voice {wanted!r}, using {voice!r}")
         speed = min(max(float(body.get("speed") or CFG["speed"]), 0.5), 2.0)
         accepted = State.speaker.speak(
             text,
@@ -340,9 +336,11 @@ class Handler(BaseHTTPRequestHandler):
 
 class Server(ThreadingHTTPServer):
     daemon_threads = True
-    # On Windows SO_REUSEADDR lets a second daemon bind the same port; the bind
-    # must fail instead so that only one instance ever runs.
-    allow_reuse_address = False
+    # Only one daemon may ever run, so a second bind of the port must fail. On
+    # Windows SO_REUSEADDR would let it succeed (SO_EXCLUSIVEADDRUSE is used
+    # instead); on Linux and macOS it only allows rebinding over connections in
+    # TIME_WAIT, which a restart needs.
+    allow_reuse_address = os.name != "nt"
 
     def server_bind(self):
         if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
@@ -355,14 +353,14 @@ class Server(ThreadingHTTPServer):
 def load_in_background() -> None:
     started = time.monotonic()
     try:
-        engine = load_model()
+        model = load_model()
     except Exception as error:
-        log(f"{ENGINE} model load failed: {error!r}")
+        log(f"model load failed: {error!r}")
         State.server.shutdown()
         return
-    State.speaker = Speaker(engine)
+    State.speaker = Speaker(model)
     State.ready.set()
-    log(f"{ENGINE} ready in {time.monotonic() - started:.1f}s, providers {engine.providers}")
+    log(f"ready in {time.monotonic() - started:.1f}s, providers {model.providers}")
 
 
 def main() -> int:
@@ -372,8 +370,8 @@ def main() -> int:
     except OSError as error:
         log(f"port {port} unavailable ({error}); another daemon is probably running")
         return 1
-    device = f"CUDA device {CFG['cuda_device']}" if ENGINE == "kokoro" else "CPU"
-    log(f"pid {os.getpid()} listening on 127.0.0.1:{port}, {ENGINE} on {device}")
+    device = f"CUDA device {CFG['cuda_device'] or 0}" if CUDA else "the CPU"
+    log(f"pid {os.getpid()} listening on 127.0.0.1:{port}, Paradee on {device}")
     threading.Thread(target=load_in_background, daemon=True).start()
     try:
         State.server.serve_forever()

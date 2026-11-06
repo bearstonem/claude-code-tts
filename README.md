@@ -1,318 +1,208 @@
-# Kokoro TTS Hook for Claude Code
+# Claude Code TTS
 
-Automatic TTS (text-to-speech) integration for Claude Code using the [Kokoro TTS model](https://github.com/nazdridoy/kokoro-tts). This project provides voice feedback that reads Claude's responses aloud as you work.
+Claude Code reads its replies aloud as you work. Speech comes from
+[Paradee-8M](https://www.sahilmahendrakar.com/writings/paradee-1-2), an
+8-million-parameter text-to-speech model (8.5 MB) that runs on the CPU, about
+30 times faster than real time on one core of a desktop CPU. No GPU needed; an
+NVIDIA GPU is optional.
 
-> **This fork** of [ktaletsk/claude-code-tts](https://github.com/ktaletsk/claude-code-tts) adds a
-> Windows port in [`windows/`](windows/README.md): the model runs in a persistent daemon, either
-> Kokoro on an NVIDIA GPU or [Paradee-8M](https://huggingface.co/sahilmahendrakar/Paradee-8M-v1.2)
-> on the CPU, with Python hooks in place of the macOS bash scripts. It also narrates the text Claude
-> writes before tool calls, can give each open Claude Code session its own voice, and
-> `claude-tts on` / `claude-tts off` mute it across sessions. The rest of this README describes
-> the upstream macOS hooks.
+Works on Windows, Linux and macOS.
 
 ## Features
 
-- **Automatic TTS Playback**: Claude's responses are automatically read aloud using Kokoro TTS
-- **Smart Interruption**: Audio stops automatically when you submit a new message
-- **Non-Blocking**: Audio plays in the background without interfering with your workflow
-- **Clean Speech**: Automatically strips markdown and technical formatting for clear audio
-- **TTS Summary Mode**: Optional summary extraction for concise audio feedback
-- **Audio Ducking** (macOS): Automatically lowers Apple Music volume while TTS speaks, like Google Maps in CarPlay
+- **Speaks a short summary of each reply**: Claude ends every response with a
+  hidden spoken summary, so you hear what was done, not the code.
+- **Narrates as it works**: the text Claude writes before running a tool is read out too.
+- **A voice per session**: with several Claude Code sessions open, each speaks
+  in its own voice, so you can tell them apart by ear.
+- **Stops when you move on**: a new prompt silences that session's speech.
+- **`claude-tts on` / `claude-tts off`**: mute and unmute every session at once.
+- **Fast and local**: the model stays loaded in a small background process, so
+  speech starts within a fraction of a second, and nothing leaves your machine.
+- **Clean speech**: Markdown, code, links and file paths are stripped before speaking.
+- **Audio ducking (macOS)**: lowers Apple Music's volume while Claude speaks.
 
-## What's Included
+## Requirements
 
-This repository contains:
+- [Claude Code](https://claude.com/claude-code)
+- [uv](https://docs.astral.sh/uv/getting-started/installation/)
+- Linux only: PortAudio, for playing audio
+  - Debian/Ubuntu: `sudo apt install libportaudio2`
+  - Fedora: `sudo dnf install portaudio`
+  - Arch: `sudo pacman -S portaudio`
 
-- `install.sh` - Automated installation script for setting up hooks
-- `hooks/` - Reference copies of the TTS hook scripts
-- `docs/TTS_HOOK_DOCUMENTATION.md` - Comprehensive documentation and troubleshooting guide
-- `CLAUDE.md` - Repository context for Claude Code
+Windows (x64), Linux (x64 and ARM64) and macOS (Apple Silicon) are supported.
 
-Note: Model files are excluded. When you run `./install.sh`, it will automatically download them from the [kokoro-onnx GitHub releases](https://github.com/thewh1teagle/kokoro-onnx/releases) if they're not present.
+## Install
 
-## Prerequisites
-
-- **Claude Code** - Get it from [claude.ai/code](https://claude.ai/code)
-- **uv** - Fast Python package installer (get it from [astral.sh/uv](https://astral.sh))
-- **kokoro-tts CLI** - Will be installed via uv
-- **jq** - JSON processor (usually pre-installed on Linux/Mac)
-- **curl or wget** - For downloading model files (usually pre-installed)
-
-### Installing kokoro-tts
-
-```bash
-# Install using uv (recommended)
-uv tool install kokoro-tts
-
-# Verify installation
-kokoro-tts --help
+```
+git clone https://github.com/bearstonem/claude-code-tts
+cd claude-code-tts
+uv run install.py
 ```
 
-## Quick Start
+`uv run` creates the environment (Python 3.12 included, about 400 MB) and the
+installer:
 
-1. **Clone this repository**:
+1. downloads Paradee from Hugging Face,
+2. writes `config.json`,
+3. adds the hooks to `~/.claude/settings.json` (backing it up to
+   `settings.json.bak-tts` first),
+4. adds the spoken-summary instructions to `~/.claude/CLAUDE.md`,
+5. puts the `claude-tts` command in `~/.local/bin`,
+6. starts the speech daemon and says "Text to speech is set up."
 
-   ```bash
-   git clone <repository-url>
-   cd claude-code-tts
-   ```
+Start a new Claude Code session and it will talk. Re-running the installer is safe.
 
-2. **Run the installer**:
+Options: `--voice bm_fable` picks the main voice, and `--gpu` runs on an NVIDIA
+GPU (see below).
 
-   ```bash
-   ./install.sh
-   ```
+## Use
 
-   The installer will:
-   - Check for required dependencies
-   - Download model files if not present
-   - Set up TTS hooks in `~/.claude/hooks/`
-   - Configure Claude Code settings
-   - Add TTS summary instructions to `~/.claude/CLAUDE.md` (preserves existing content)
-
-3. **Start using Claude Code**:
-   The TTS system will automatically activate and read responses aloud.
-
-## How It Works
-
-The system uses Claude Code's hook system to automatically:
-
-1. **Capture responses**: When Claude finishes responding, a Stop event triggers
-2. **Extract text**: The hook extracts Claude's text from the conversation transcript
-3. **Process for TTS**: Strips markdown formatting and technical elements
-4. **Play audio**: Streams to kokoro-tts with the af_sky voice
-5. **Handle interruptions**: Kills TTS playback when you submit a new prompt
-
-## Configuration
-
-### Hook Location
-
-After installation, hooks are located at:
-- `~/.claude/hooks/tts-stop-hook.sh` - Main TTS playback hook (Stop event)
-- `~/.claude/hooks/tts-pretooluse-hook.sh` - Pre-tool narration (PreToolUse event)
-- `~/.claude/hooks/tts-interrupt-hook.sh` - Interruption handler (UserPromptSubmit event)
-- `~/.claude/hooks/tts-session-end-hook.sh` - Session cleanup (SessionEnd event)
-
-### Changing Voice
-
-Set the `KOKORO_VOICE` environment variable in `~/.claude/settings.json`:
-
-```json
-{
-  "env": {
-    "KOKORO_VOICE": "af_bella"
-  }
-}
+```
+claude-tts off            # stop talking now and stay quiet (also unloads the model)
+claude-tts on             # talk again
+claude-tts toggle
+claude-tts status
+claude-tts voice          # list the voices
+claude-tts voice bm_fable # switch and hear a sample
+claude-tts sessions       # which session has which voice
+claude-tts sessions off   # one voice for every session
+claude-tts restart        # after editing config.json
 ```
 
-The default voice is `af_sky`. Changes take effect on the next Claude Code session.
+These apply to every Claude Code session at once. Inside Claude Code, prefix
+them with `!` (for example `! claude-tts off`) to run them without a model turn.
 
-#### Available Voices (54 total)
+## Voices
 
-**American English:**
+| Voice | Accent |
+| --- | --- |
+| `af_heart` | American, female (default) |
+| `am_puck` | American, male |
+| `bf_isabella` | British, female |
+| `bm_fable` | British, male |
 
-- Female: `af_alloy`, `af_aoede`, `af_bella`, `af_heart`, `af_jessica`, `af_kore`, `af_nicole`, `af_nova`, `af_river`, `af_sarah`, `af_sky`
-- Male: `am_adam`, `am_echo`, `am_eric`, `am_fenrir`, `am_liam`, `am_michael`, `am_onyx`, `am_puck`
+### A voice per session
 
-**British English:**
+Each Claude Code session takes the voice that the fewest other open sessions
+are using. The first session gets your main `voice`, then `bm_fable`,
+`am_puck` and `bf_isabella` (set `session_voices` in `config.json` to change
+the list). A session keeps its voice until it ends, and sessions that crashed
+let theirs go after 12 idle hours. `claude-tts sessions` lists them by project
+folder; `claude-tts sessions off` gives every session the main voice.
 
-- Female: `bf_alice`, `bf_emma`, `bf_isabella`, `bf_lily`
-- Male: `bm_daniel`, `bm_fable`, `bm_george`, `bm_lewis`
+## GPU (optional)
 
-**Other Languages:**
+Paradee is small enough that the CPU is plenty; on an RTX 4090 it runs only
+about a quarter faster than on one CPU core, since most of the time goes to
+turning text into phonemes. To move the work to an NVIDIA GPU anyway:
 
-- French: `ff_siwis`
-- Italian: `if_sara`, `im_nicola`
-- Japanese: `jf_alpha`, `jf_gongitsune`, `jf_nezumi`, `jf_tebukuro`, `jm_kumo`
-- Mandarin: `zf_xiaobei`, `zf_xiaoni`, `zf_xiaoxiao`, `zf_xiaoyi`, `zm_yunjian`, `zm_yunxi`, `zm_yunxia`, `zm_yunyang`
-
-See [Kokoro VOICES.md](https://huggingface.co/hexgrad/Kokoro-82M/blob/main/VOICES.md) for the complete list
-
-### Audio Ducking (macOS)
-
-Audio ducking automatically lowers your music volume when TTS speaks, then restores it when done - just like Google Maps does in CarPlay.
-
-**How it works:**
-- When TTS starts, Apple Music volume drops to 5% of its current level
-- When TTS finishes, volume is restored to the original level
-- If you interrupt TTS by sending a new message, volume is also restored
-
-**Configuration via environment variables in `~/.claude/settings.json`:**
-
-```json
-{
-  "env": {
-    "AUDIO_DUCK_ENABLED": "true",
-    "DUCK_LEVEL": "5"
-  }
-}
+```
+uv run install.py --gpu        # the first GPU
+uv run install.py --gpu 4090   # the GPU whose name contains "4090"
+uv run install.py --cpu        # back to the CPU
 ```
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `AUDIO_DUCK_ENABLED` | `true` | Set to `false` to disable audio ducking |
-| `DUCK_LEVEL` | `5` | Percentage of original volume during TTS (lower = quieter music) |
+`--gpu` sets up a separate environment in `gpu/` with the CUDA runtime (about
+1 GB, as pip packages; no CUDA toolkit needed) and pins the daemon to that GPU.
+It needs an NVIDIA driver and works on Windows and Linux.
 
-**Note:** Audio ducking currently supports Apple Music on macOS. It uses AppleScript to control the app's volume directly, so other audio (including TTS) remains at full volume.
+## Where it works
 
-### TTS Summary Mode
+The hooks run wherever Claude Code runs on your own machine:
 
-The installer automatically adds TTS summary instructions to `~/.claude/CLAUDE.md`. This enables Claude to provide concise, spoken summaries at the end of each response.
+- the `claude` command in a terminal,
+- the **Claude desktop app's Code tab** (local sessions),
+- the VS Code and JetBrains extensions.
 
-The configuration tells Claude to include a special TTS-friendly summary:
+All of them read `~/.claude/settings.json` and `~/.claude/CLAUDE.md`. It does
+not work in cloud sessions (claude.ai/code or a desktop session in a cloud
+environment), which do not read your local settings, or in ordinary Claude
+chats, which have no hooks. For a desktop session over SSH, install it on the
+remote machine; the audio then plays there.
 
-```markdown
-<!-- TTS_SUMMARY
-Brief, natural language summary of what you did. No URLs, no technical jargon.
-TTS_SUMMARY -->
+## How it works
+
+- **`tts_daemon.py`** loads Paradee once and listens on `127.0.0.1:7457`. It
+  plays speech on the default output device, re-checking it for every reply so
+  switching to headphones works. A new reply replaces the one playing.
+- **`tts_hook.py`** is the Claude Code hook for SessionStart (start the daemon
+  early), PreToolUse (narrate), Stop (speak the summary), UserPromptSubmit
+  (silence) and SessionEnd (silence and release the voice). Hooks never write
+  to stdout and always exit 0, so a speech problem cannot block Claude.
+- **`tts_sessions.py`** hands out the per-session voices.
+- **`tts_cli.py`** is the `claude-tts` command; **`install.py`** the installer.
+- **`scripts/strip_markdown.py`** turns Markdown into speakable text.
+
+Claude writes the spoken summary at the end of each reply inside an HTML
+comment marked `TTS_SUMMARY`, so it does not show on screen. When a reply has
+none, the whole reply is read.
+
+## Configure
+
+Settings live in `config.json` next to the installer. Run `claude-tts restart`
+after editing it.
+
+| Setting | Default | |
+| --- | --- | --- |
+| `enabled` | `true` | `claude-tts on` / `off` |
+| `voice` | `af_heart` | the main voice |
+| `voice_per_session` | `true` | a voice per Claude Code session |
+| `session_voices` | all four | the voices sessions take in turn |
+| `speed` | `1.0` | 0.5 to 2.0 |
+| `volume` | `1.0` | |
+| `output_device` | `null` | part of a device name; `null` follows the system default |
+| `narrate_tool_use` | `true` | read the text written before tool calls |
+| `device` | `cpu` | `cuda` after `install.py --gpu` |
+| `cuda_device` | `null` | GPU UUID or nvidia-smi index |
+| `threads` | `1` | CPU threads for synthesis |
+| `duck_music` | `true` | macOS: lower Apple Music while speaking |
+| `port` | `7457` | |
+
+`CLAUDE_TTS_VOICE` and `CLAUDE_TTS_SPEED` in the `env` block of
+`~/.claude/settings.json` override the voice and speed.
+
+## Troubleshoot
+
+- `claude-tts status` shows whether speech is on and what the daemon is doing.
+- Logs (`hook.log`, `daemon.log`): `%LOCALAPPDATA%\claude-code-tts` on Windows,
+  `~/.local/state/claude-code-tts` on Linux and macOS.
+- No sound on Linux: install PortAudio (see Requirements) and re-run the installer.
+- Speech in the wrong place: set `output_device` to part of the device's name.
+- Claude does not end replies with a summary: start a new session so it reads
+  the updated `~/.claude/CLAUDE.md`.
+
+## Uninstall
+
+```
+uv run install.py --uninstall
 ```
 
-The hook automatically detects and reads only the summary portion, providing shorter and more focused audio feedback.
-
-## Troubleshooting
-
-### No audio playing?
-
-1. Check if kokoro-tts is installed: `kokoro-tts --help`
-2. Check hook logs: `tail -f /tmp/kokoro-hook.log`
-3. Verify hooks are executable: `ls -l ~/.claude/hooks/`
-
-### Audio cuts off mid-sentence?
-
-Increase the character limit in the hook (default: 5000 characters):
-
-```bash
-# In tts-stop-hook.sh
-' | head -c 10000)  # Increased to 10000
-```
-
-### Audio continues after interruption?
-
-Check that the interrupt hook is properly installed:
-
-```bash
-cat ~/.claude/hooks/tts-interrupt-hook.sh
-```
-
-### Detailed Troubleshooting
-
-See `docs/TTS_HOOK_DOCUMENTATION.md` for comprehensive troubleshooting steps.
-
-## Manual Installation
-
-If you prefer manual setup instead of using `install.sh`:
-
-1. **Copy model files**:
-
-   ```bash
-   # Models can stay in this directory or be moved elsewhere
-   # The hooks don't need to reference them directly
-   ```
-
-2. **Create hook directory**:
-
-   ```bash
-   mkdir -p ~/.claude/hooks
-   ```
-
-3. **Create TTS hook** (`~/.claude/hooks/tts-stop-hook.sh`):
-   See `docs/TTS_HOOK_DOCUMENTATION.md` for the full hook script.
-
-4. **Create interrupt hook** (`~/.claude/hooks/tts-interrupt-hook.sh`):
-   See `docs/TTS_HOOK_DOCUMENTATION.md` for the full hook script.
-
-5. **Make hooks executable**:
-
-   ```bash
-   chmod +x ~/.claude/hooks/tts-stop-hook.sh
-   chmod +x ~/.claude/hooks/tts-interrupt-hook.sh
-   ```
-
-6. **Configure hooks in `~/.claude/settings.json`**:
-
-   ```json
-   {
-     "hooks": {
-       "Stop": [{"hooks": [{"type": "command", "command": "bash ~/.claude/hooks/tts-stop-hook.sh", "timeout": 10}]}],
-       "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "bash ~/.claude/hooks/tts-interrupt-hook.sh", "timeout": 5}]}]
-     }
-   }
-   ```
-
-## Project Structure
-
-```text
-claude-code-tts/
-├── README.md                      # This file
-├── LICENSE                        # MIT License
-├── install.sh                     # Automated setup script
-├── CLAUDE.md                      # Repository context for Claude Code
-├── pyproject.toml                 # Python project config (uv)
-├── .pre-commit-config.yaml        # Pre-commit hooks config
-├── docs/                          # Documentation directory
-│   └── TTS_HOOK_DOCUMENTATION.md  # Detailed technical documentation
-├── hooks/                         # Reference copies of hook scripts
-│   ├── tts-stop-hook.sh           # Main TTS playback hook
-│   ├── tts-pretooluse-hook.sh     # PreToolUse narration hook
-│   ├── tts-interrupt-hook.sh      # Interrupt handler hook
-│   └── tts-session-end-hook.sh    # Session cleanup hook
-├── scripts/                       # Utilities
-│   ├── strip_markdown.py          # Markdown stripping with mistune
-│   └── audio-duck.sh              # Audio ducking helper (macOS)
-├── tests/                         # Test suite
-│   └── test_strip_markdown.py     # Pytest tests for markdown stripping
-├── kokoro-v1.0.onnx              # TTS model (310MB, not in git)
-├── voices-v1.0.bin               # Voice embeddings (25MB, not in git)
-└── .gitignore                    # Git ignore rules
-```
+This removes the hooks, the CLAUDE.md section and the `claude-tts` command, and
+stops the daemon. Then delete this folder. The model stays in the Hugging Face
+cache (`~/.cache/huggingface`).
 
 ## Development
 
-This project uses [uv](https://astral.sh/uv) for Python package management and [pre-commit](https://pre-commit.com/) with [shellcheck](https://www.shellcheck.net/) for shell scripts, [ruff](https://docs.astral.sh/ruff/) for Python linting/formatting, and [pymarkdown](https://github.com/jackdewinter/pymarkdown) for markdown linting.
-
-### Setup
-
-```bash
-# Install dev dependencies
-uv sync --dev
-
-# Install pre-commit hooks
-uv run pre-commit install
+```
+uv sync
+uv run ruff check .
+uv run pytest
 ```
 
-### Running Linters
-
-```bash
-# Run all linters (shellcheck, ruff, pymarkdown)
-uv run pre-commit run --all-files
-```
-
-### Running Tests
-
-```bash
-# Run pytest test suite
-uv run pytest tests/ -v
-```
-
-## Contributing
-
-Contributions are welcome. For bugs, issues, or feature requests, please submit a ticket at
-[todo.sr.ht/~cg/claude-code-tts](https://todo.sr.ht/~cg/claude-code-tts).
-
-## Support This Project
-
-If you find this integration useful, consider supporting me to build more cool things in the future:
-[![Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/orbrx)
-
-## License
-
-This project is licensed under the ISC License - see the LICENSE file for details.
+The tests run the real hooks and daemon on a separate port with their own
+config, so they do not touch an installed copy. CI runs them on Windows, Linux
+(x64 and ARM64) and macOS.
 
 ## Credits
 
-- **Kokoro TTS** - [hexgrad/kokoro](https://github.com/hexgrad/kokoro)
-- **Claude Code** - [Anthropic](https://www.anthropic.com)
+- [Paradee](https://github.com/sahilmahendrakar/paradee) by Sahil Mahendrakar
+  ([model](https://huggingface.co/sahilmahendrakar/Paradee-8M-v1.2),
+  [write-up](https://www.sahilmahendrakar.com/writings/paradee-1-2)), Apache-2.0.
+- Forked from [ktaletsk/claude-code-tts](https://github.com/ktaletsk/claude-code-tts),
+  which started the idea of speaking Claude Code's replies with hooks.
 
-## Acknowledgments
+## License
 
-Thanks to the Kokoro TTS team for creating an open-source text-to-speech model.
+ISC, see [LICENSE](LICENSE).

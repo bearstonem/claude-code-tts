@@ -1,4 +1,4 @@
-"""Claude Code hooks that drive the Kokoro TTS daemon (Windows port of ../hooks/*.sh).
+"""Claude Code hooks that make the text-to-speech daemon speak Claude's replies.
 
   tts_hook.py warm       SessionStart      start the daemon early so the model is loaded
   tts_hook.py stop       Stop              speak the reply's TTS_SUMMARY, or the whole reply
@@ -14,6 +14,7 @@ While "enabled" is false in config.json (`claude-tts off`) they speak nothing.
 """
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -24,10 +25,10 @@ import urllib.request
 from pathlib import Path
 
 import tts_sessions
-from tts_common import HERE, MAX_LOG_BYTES, REPO, load_config, log_path
+from tts_common import GPU_VENV, HERE, MAX_LOG_BYTES, load_config, log_path, venv_python
 from tts_common import log as _log
 
-sys.path.insert(0, str(REPO / "scripts"))
+sys.path.insert(0, str(HERE / "scripts"))
 from strip_markdown import strip_markdown  # noqa: E402
 
 STARTED_AT = time.time()
@@ -63,31 +64,45 @@ def request(path: str, payload: dict | None = None, timeout: float = 2.0):
         return None
 
 
+def daemon_python() -> Path:
+    """The GPU environment's interpreter with "device": "cuda", else this one."""
+    if load_config()["device"] == "cuda":
+        gpu = venv_python(GPU_VENV, windowless=True)
+        if gpu.exists():
+            return gpu
+        log(f"device is cuda but {GPU_VENV} is missing; run install.py --gpu. Using the CPU.")
+    exe = Path(sys.executable)
+    if os.name == "nt" and exe.with_name("pythonw.exe").exists():
+        return exe.with_name("pythonw.exe")  # no console window
+    return exe
+
+
 def start_daemon() -> None:
-    pythonw = Path(sys.executable).with_name("pythonw.exe")
-    exe = pythonw if pythonw.exists() else Path(sys.executable)
+    command = [str(daemon_python()), str(HERE / "tts_daemon.py")]
     path = log_path("daemon")
     try:
         if path.exists() and path.stat().st_size > MAX_LOG_BYTES:
             path.replace(path.with_suffix(".log.old"))
     except OSError:
         pass
-    flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
-    error = None
+    common = dict(cwd=HERE, stdin=subprocess.DEVNULL, close_fds=True)
     with path.open("ab") as out:
+        common.update(stdout=out, stderr=out)
+        if os.name != "nt":
+            # Its own session, so it outlives this hook and Claude Code's process group
+            try:
+                subprocess.Popen(command, start_new_session=True, **common)
+                log("started daemon")
+            except OSError as error:
+                log(f"could not start daemon: {error!r}")
+            return
+        flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+        error = None
         # Break away from Claude Code's job object, if it has one, so the daemon
         # outlives this hook; not every job allows that, so fall back without it
         for extra in (subprocess.CREATE_BREAKAWAY_FROM_JOB, 0):
             try:
-                subprocess.Popen(
-                    [str(exe), str(HERE / "tts_daemon.py")],
-                    cwd=HERE,
-                    stdin=subprocess.DEVNULL,
-                    stdout=out,
-                    stderr=out,
-                    creationflags=flags | extra,
-                    close_fds=True,
-                )
+                subprocess.Popen(command, creationflags=flags | extra, **common)
                 log("started daemon")
                 return
             except OSError as e:

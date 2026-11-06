@@ -3,12 +3,11 @@
 Every hook gets the session's id from Claude Code. With "voice_per_session" on,
 a session's first hook claims the voice from the rotation ([voice] followed by
 "session_voices") that the fewest other live sessions are using, and keeps it
-until SessionEnd. Claims live in %LOCALAPPDATA%\\claude-code-tts\\sessions.json,
-shared by every session's hooks under a file lock.
+until SessionEnd. Claims live in sessions.json in the state directory (see
+tts_common.LOG_DIR), shared by every session's hooks under a file lock.
 """
 
 import json
-import msvcrt
 import os
 import time
 from contextlib import contextmanager
@@ -20,6 +19,34 @@ SESSIONS_PATH = LOG_DIR / "sessions.json"
 LOCK_PATH = LOG_DIR / "sessions.lock"
 # A session that crashed never sends SessionEnd; let its voice go after this long idle
 IDLE_SECONDS = 12 * 3600
+LOCK_TIMEOUT = 10.0
+
+if os.name == "nt":
+    import msvcrt
+
+    def _try_lock(fd: int) -> bool:
+        try:
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            return True
+        except OSError:
+            return False
+
+    def _unlock(fd: int) -> None:
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+
+else:
+    import fcntl
+
+    def _try_lock(fd: int) -> bool:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except BlockingIOError:
+            return False
+
+    def _unlock(fd: int) -> None:
+        fcntl.flock(fd, fcntl.LOCK_UN)
 
 
 def rotation(cfg: dict) -> list[str]:
@@ -32,12 +59,15 @@ def _locked():
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     fd = os.open(LOCK_PATH, os.O_RDWR | os.O_CREAT)
     try:
-        msvcrt.locking(fd, msvcrt.LK_LOCK, 1)  # retries for up to 10 s, then OSError
+        deadline = time.monotonic() + LOCK_TIMEOUT
+        while not _try_lock(fd):
+            if time.monotonic() > deadline:
+                raise TimeoutError(f"{LOCK_PATH} stayed locked for {LOCK_TIMEOUT:.0f}s")
+            time.sleep(0.02)
         try:
             yield
         finally:
-            os.lseek(fd, 0, os.SEEK_SET)
-            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+            _unlock(fd)
     finally:
         os.close(fd)
 
