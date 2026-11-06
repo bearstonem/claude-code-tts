@@ -6,6 +6,9 @@
   claude-tts status         what is configured and what the daemon is running (default)
   claude-tts engine [NAME]  show or switch the engine: kokoro (GPU) or paradee (CPU)
   claude-tts voice [NAME]   list the voices, or switch to one and hear it
+  claude-tts sessions [on|off]
+                            give each Claude Code session its own voice, or
+                            list the sessions and their voices
   claude-tts restart        restart the daemon, e.g. after editing config.json
 
 Changes apply to every Claude Code session at once; nothing needs restarting.
@@ -15,10 +18,12 @@ Inside Claude Code, run them with a leading "!", e.g. `! claude-tts off`.
 import argparse
 import sys
 import textwrap
+import time
 from pathlib import Path
 
 import install
 import tts_hook as hook
+import tts_sessions
 from tts_common import CONFIG_PATH, ENGINES, LOG_DIR, load_config, save_config
 
 DAEMON_LOG = LOG_DIR / "daemon.log"
@@ -60,6 +65,8 @@ def cmd_status(args) -> int:
     cfg = load_config()
     print(f"TTS is {'on' if cfg['enabled'] else 'off'}")
     print(f"engine  {cfg['engine']}, voice {cfg['voice']}, speed {cfg['speed']}")
+    if cfg["voice_per_session"]:
+        print(f"voices  one per session: {', '.join(tts_sessions.rotation(cfg))}")
     state = health()
     if state is None:
         when = " (starts with the next reply)" if cfg["enabled"] else ""
@@ -120,9 +127,37 @@ def cmd_voice(args) -> int:
         return fail(f"{cfg['engine']} has no voice {args.name!r}; it has {', '.join(voices)}")
     save_config({"voice": args.name})
     print(f"Voice: {args.name}")
+    if cfg["voice_per_session"]:
+        print("  (for new sessions first in line; running sessions keep theirs)")
     if cfg["enabled"]:
         # af_heart -> "Heart", bm_fable -> "Fable"
         hook.speak(f"Hi, I'm {args.name.split('_', 1)[-1].capitalize()}.", voice=args.name)
+    return 0
+
+
+def ago(seconds: float) -> str:
+    minutes = int(seconds // 60)
+    return f"{minutes // 60}h ago" if minutes >= 60 else f"{minutes}m ago"
+
+
+def cmd_sessions(args) -> int:
+    if args.state:
+        save_config({"voice_per_session": args.state == "on"})
+    cfg = load_config()
+    if not cfg["voice_per_session"]:
+        print(f"Every session speaks as {cfg['voice']}. `claude-tts sessions on` "
+              "gives each its own voice.")
+        return 0
+    print(f"Each session gets its own voice, in turn: {', '.join(tts_sessions.rotation(cfg))}")
+    print("(set the list with \"session_voices\" in config.json)")
+    sessions = tts_sessions.active()
+    if args.state == "on":
+        print("Running sessions pick theirs at their next reply.")
+    elif sessions:
+        now = time.time()
+        for sid, entry in sorted(sessions.items(), key=lambda kv: kv[1]["seen"]):
+            name = entry.get("project") or "?"
+            print(f"  {entry['voice']:<12} {name:<28} {sid[:8]}  {ago(now - entry['seen'])}")
     return 0
 
 
@@ -139,6 +174,7 @@ COMMANDS = {
     "status": (cmd_status, "show what is configured and running"),
     "engine": (cmd_engine, "show or switch the engine"),
     "voice": (cmd_voice, "list the voices, or switch to one"),
+    "sessions": (cmd_sessions, "one voice per Claude Code session (on/off), or list them"),
     "restart": (cmd_restart, "restart the daemon"),
 }
 
@@ -157,6 +193,8 @@ def main(argv: list[str] | None = None) -> int:
             cmd.add_argument("name", nargs="?", choices=ENGINES)
         elif name == "voice":
             cmd.add_argument("name", nargs="?")
+        elif name == "sessions":
+            cmd.add_argument("state", nargs="?", choices=("on", "off"))
     args = parser.parse_args(argv)
     handler = COMMANDS[args.command or "status"][0]
     return handler(args)

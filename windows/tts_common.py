@@ -29,6 +29,11 @@ DEFAULTS = {
     "paradee_model": None,
     "paradee_config": None,
     "voice": "af_sky",
+    # Give each concurrent Claude Code session its own voice: the first gets "voice",
+    # later ones the least used of "session_voices" (`claude-tts sessions on`)
+    "voice_per_session": False,
+    # Voices both engines have: American and British, female and male
+    "session_voices": ["af_heart", "bm_fable", "am_puck", "bf_isabella"],
     "speed": 1.0,
     "volume": 1.0,
     # Substring of an output device name; null follows the Windows default device

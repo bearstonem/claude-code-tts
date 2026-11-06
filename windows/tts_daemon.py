@@ -3,8 +3,9 @@
 Loads the model once, keeps it resident and plays speech on the output device.
 config.json's "engine" picks the model. tts_hook.py talks to it over localhost:
 
-  POST /speak     {"text": ..., "voice": ..., "speed": ...}  replaces whatever is playing
-  POST /stop      silences playback
+  POST /speak     {"text": ..., "voice": ..., "speed": ..., "session": ...}
+                  replaces whatever is playing
+  POST /stop      silences playback; with {"session": ...} only that session's
   POST /shutdown  exits the daemon (the next hook starts a fresh one)
   GET  /health    readiness, engine, voices, execution providers, pinned device
 """
@@ -160,7 +161,9 @@ class Speaker:
         self.generation = 0
         self.speaking = False
         self.last_speak = 0.0
-        self.last_stop = 0.0
+        self.last_stop = 0.0  # a stop for everyone (`claude-tts off`)
+        self.session_stops: dict[str, float] = {}  # a stop from one session's hook
+        self.session = ""  # the session whose speech is playing, or played last
         self.lock = threading.Lock()
         self.play_lock = threading.Lock()
         self.synth_lock = threading.Lock()
@@ -172,19 +175,25 @@ class Speaker:
         speed: float,
         requested_at: float,
         narration: bool,
+        session: str = "",
     ) -> bool:
         """Start speaking unless the request was overtaken while its hook ran.
 
         Hooks run in the background and can arrive out of order. A reply is
-        dropped only by a stop sent after it (the user moved on); narration of a
-        tool call is also dropped by any newer speech, so it never talks over the
-        final reply.
+        dropped only by a stop sent after it, by its own session or for all (the
+        user moved on); narration of a tool call is also dropped by any newer
+        speech, so it never talks over a reply.
         """
         with self.lock:
-            overtaken = max(self.last_stop, self.last_speak if narration else 0.0)
+            overtaken = max(
+                self.last_stop,
+                self.session_stops.get(session, 0.0),
+                self.last_speak if narration else 0.0,
+            )
             if requested_at < overtaken:
                 return False
             self.last_speak = max(self.last_speak, requested_at)
+            self.session = session
             self.generation += 1
             generation = self.generation
         threading.Thread(
@@ -192,10 +201,16 @@ class Speaker:
         ).start()
         return True
 
-    def stop(self) -> None:
+    def stop(self, session: str | None = None) -> None:
+        """Silence everything, or with a session only that session's speech."""
         with self.lock:
-            self.last_stop = time.time()
-            self.generation += 1
+            if session is None:
+                self.last_stop = time.time()
+                self.generation += 1
+                return
+            self.session_stops[session] = time.time()
+            if session == self.session:
+                self.generation += 1
 
     def _live(self, generation: int) -> bool:
         return generation == self.generation
@@ -279,7 +294,7 @@ class Handler(BaseHTTPRequestHandler):
 
         if self.path == "/stop":
             if State.speaker:
-                State.speaker.stop()
+                State.speaker.stop(str(body["session"]) if body.get("session") else None)
             return self._reply(200, {"ok": True})
         if self.path == "/shutdown":
             self._reply(200, {"ok": True})
@@ -307,6 +322,7 @@ class Handler(BaseHTTPRequestHandler):
             speed,
             requested_at=float(body.get("requested_at") or time.time()),
             narration=bool(body.get("narration")),
+            session=str(body.get("session") or ""),
         )
         self._reply(202 if accepted else 200, {"ok": True, "skipped": not accepted})
 

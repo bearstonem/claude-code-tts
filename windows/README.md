@@ -19,6 +19,7 @@ naturalness ([write-up](https://www.sahilmahendrakar.com/writings/paradee-1-2)).
 - `tts_hook.py` is the Claude Code hook (`warm`, `stop`, `pretool`, `interrupt`,
   `end`). It starts the daemon if needed and sends it text over HTTP.
 - `tts_cli.py` is the `claude-tts` command: on/off, engine, voice.
+- `tts_sessions.py` hands out one voice per Claude Code session.
 - `install.py` downloads the model, writes `config.json`, merges the hooks into
   `~/.claude/settings.json` and puts `claude-tts` in `~/.local/bin`.
 
@@ -42,15 +43,30 @@ claude-tts status
 claude-tts engine paradee # or kokoro; restarts the daemon
 claude-tts voice          # list voices
 claude-tts voice bm_fable # switch and hear a sample
+claude-tts sessions on    # one voice per Claude Code session (see below)
 claude-tts restart        # after editing config.json
 ```
 
 These apply to every Claude Code session at once. Inside Claude Code, prefix
 them with `!` (e.g. `! claude-tts off`) to run them without a model turn.
 
+## A voice per session
+
+With several Claude Code sessions open, `claude-tts sessions on` gives each its
+own voice so you can tell who is talking. Every hook carries Claude Code's
+session id. A session's first hook claims the voice that the fewest other live
+sessions are using, from `voice` followed by `session_voices` (default
+`af_heart`, `bm_fable`, `am_puck`, `bf_isabella`, which both engines have). The
+session keeps that voice until SessionEnd releases it, or after 12 idle hours.
+`claude-tts sessions` lists which session (by project folder) has which voice.
+
+Stopping is per session too: a new prompt in one session silences only that
+session's speech, not another's. `claude-tts off` still silences everything.
+
 ## Configure
 
-`windows/config.json`: `enabled`, `engine`, `voice`, `speed`, `volume`,
+`windows/config.json`: `enabled`, `engine`, `voice`, `voice_per_session`,
+`session_voices`, `speed`, `volume`,
 `output_device` (part of a device name, or `null` for the Windows default),
 `narrate_tool_use`, `cuda_device` (Kokoro's GPU UUID), and the model paths.
 Run `claude-tts restart` after editing it. If the voice is not one the engine

@@ -3,8 +3,10 @@
   tts_hook.py warm       SessionStart      start the daemon early so the model is loaded
   tts_hook.py stop       Stop              speak the reply's TTS_SUMMARY, or the whole reply
   tts_hook.py pretool    PreToolUse        speak the text Claude wrote before a tool call
-  tts_hook.py interrupt  UserPromptSubmit  silence playback when a new prompt is sent
-  tts_hook.py end        SessionEnd        silence playback
+  tts_hook.py interrupt  UserPromptSubmit  silence this session's speech on a new prompt
+  tts_hook.py end        SessionEnd        silence it and release its voice
+
+With voice_per_session on, each session speaks in its own voice (tts_sessions.py).
 
 Hooks never print to stdout (SessionStart and UserPromptSubmit output would be added
 to Claude's context) and always exit 0, so a TTS problem can never block Claude Code.
@@ -21,6 +23,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+import tts_sessions
 from tts_common import HERE, MAX_LOG_BYTES, REPO, load_config, log_path
 from tts_common import log as _log
 
@@ -113,7 +116,24 @@ def restart_daemon(timeout: float = 90) -> bool:
     return wait_ready(timeout)
 
 
-def speak(text: str, narration: bool = False, voice: str | None = None) -> None:
+def session_voice(data: dict) -> str:
+    """The voice for the session that ran this hook: its own with voice_per_session on."""
+    session = data.get("session_id")
+    if not CFG["voice_per_session"] or not session:
+        return CFG["voice"]
+    try:
+        return tts_sessions.voice_for(CFG, session, data.get("cwd"))
+    except OSError as error:  # the lock or the file; speak anyway, in the main voice
+        log(f"session voice unavailable: {error!r}")
+        return CFG["voice"]
+
+
+def speak(
+    text: str,
+    narration: bool = False,
+    voice: str | None = None,
+    session: str | None = None,
+) -> None:
     # Read the switch again: `claude-tts off` may have run while this hook waited
     # for the transcript, and starting the daemon now would undo it
     if not load_config()["enabled"]:
@@ -130,9 +150,12 @@ def speak(text: str, narration: bool = False, voice: str | None = None) -> None:
         # Lets the daemon drop this request if a newer one or a stop overtook it
         "requested_at": STARTED_AT,
         "narration": narration,
+        # A stop from this session silences only this session's speech
+        "session": session,
     }
     reply = request("/speak", payload, timeout=10)
-    log(f"{'narration' if narration else 'reply'} ({len(payload['text'])} chars): {reply}")
+    kind = "narration" if narration else "reply"
+    log(f"{kind} ({len(payload['text'])} chars, {payload['voice']}): {reply}")
 
 
 def to_speech(text: str) -> str:
@@ -213,7 +236,7 @@ def on_stop(data: dict) -> None:
         text = last_reply(data.get("transcript_path") or "")
     speech = to_speech(text)
     if speech:
-        speak(speech)
+        speak(speech, voice=session_voice(data), session=data.get("session_id"))
 
 
 def on_pretool(data: dict) -> None:
@@ -235,16 +258,27 @@ def on_pretool(data: dict) -> None:
         return
     speech = to_speech(text)
     if len(speech) > 10:
-        speak(speech, narration=True)
+        speak(
+            speech, narration=True, voice=session_voice(data), session=data.get("session_id")
+        )
 
 
 def on_warm(data: dict) -> None:
+    # Claim the session's voice now, so sessions get voices in the order they started
+    session_voice(data)
     if request("/health", timeout=1) is None:
         start_daemon()
 
 
 def on_silence(data: dict) -> None:
-    request("/stop", {}, timeout=1)
+    # Only this session's speech: a prompt in one session should not cut off another
+    request("/stop", {"session": data.get("session_id")}, timeout=1)
+
+
+def on_end(data: dict) -> None:
+    on_silence(data)
+    if data.get("session_id"):
+        tts_sessions.forget(data["session_id"])
 
 
 HANDLERS = {
@@ -252,7 +286,7 @@ HANDLERS = {
     "stop": on_stop,
     "pretool": on_pretool,
     "interrupt": on_silence,
-    "end": on_silence,
+    "end": on_end,
 }
 # Hooks that would start the daemon or speak; skipped while TTS is turned off
 SPEAKING = {"warm", "stop", "pretool"}

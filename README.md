@@ -6,8 +6,9 @@ Automatic TTS (text-to-speech) integration for Claude Code using the [Kokoro TTS
 > Windows port in [`windows/`](windows/README.md): the model runs in a persistent daemon, either
 > Kokoro on an NVIDIA GPU or [Paradee-8M](https://huggingface.co/sahilmahendrakar/Paradee-8M-v1.2)
 > on the CPU, with Python hooks in place of the macOS bash scripts. It also narrates the text Claude
-> writes before tool calls, and `claude-tts on` / `claude-tts off` mute it across sessions. The rest
-> of this README describes the upstream macOS hooks.
+> writes before tool calls, can give each open Claude Code session its own voice, and
+> `claude-tts on` / `claude-tts off` mute it across sessions. The rest of this README describes
+> the upstream macOS hooks.
 
 ## Features
 
