@@ -2,6 +2,11 @@
 
 Automatic TTS (text-to-speech) integration for Claude Code using the [Kokoro TTS model](https://github.com/nazdridoy/kokoro-tts). This project provides voice feedback that reads Claude's responses aloud as you work.
 
+> **This fork** of [ktaletsk/claude-code-tts](https://github.com/ktaletsk/claude-code-tts) adds a
+> Windows / CUDA port in [`windows/`](windows/README.md): Kokoro runs in a persistent daemon pinned
+> to one NVIDIA GPU, with Python hooks in place of the macOS bash scripts. It also narrates the text
+> Claude writes before tool calls. The rest of this README describes the upstream macOS hooks.
+
 ## Features
 
 - **Automatic TTS Playback**: Claude's responses are automatically read aloud using Kokoro TTS
