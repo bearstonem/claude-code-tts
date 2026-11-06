@@ -45,8 +45,9 @@ if CUDA:
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
 
 import numpy as np  # noqa: E402
-import sounddevice as sd  # noqa: E402
 from paradee import SAMPLE_RATE, Paradee  # noqa: E402
+
+sd = None  # sounddevice, imported by audio()
 
 BLOCK = SAMPLE_RATE // 10  # write audio in 100 ms blocks so /stop takes effect quickly
 GAP = np.zeros(SAMPLE_RATE // 4, dtype=np.float32)  # pause after each synthesized chunk
@@ -140,10 +141,31 @@ def chunks(text: str, first: int = 150, rest: int = 400) -> list[str]:
     return out
 
 
-def output_device() -> int | None:
-    """Re-scan devices so a change of default output (headset, VR) is picked up."""
-    sd._terminate()
+def audio():
+    """sounddevice with PortAudio freshly initialized, so a new default output
+    (headset, VR) is picked up.
+
+    It is imported here rather than at start-up because PortAudio's start-up fails
+    while no sound server runs (PulseAudio on a headless Linux box, or a desktop
+    session not up yet); the daemon then still loads, and speaks once sound works.
+    A failed import is not cached, so the next utterance simply tries again.
+    """
+    global sd
+    if sd is None:
+        import sounddevice
+
+        sd = sounddevice
+        return sd
+    try:
+        sd._terminate()
+    except sd.PortAudioError:  # the last initialization failed; nothing to end
+        pass
     sd._initialize()
+    return sd
+
+
+def output_device() -> int | None:
+    sd = audio()
     wanted = CFG.get("output_device")
     if wanted:
         for index, device in enumerate(sd.query_devices()):
@@ -241,11 +263,12 @@ class Speaker:
             if not self._live(generation):
                 return
             try:
+                device = output_device()  # also (re)initializes PortAudio
                 with sd.OutputStream(
                     samplerate=SAMPLE_RATE,
                     channels=1,
                     dtype="float32",
-                    device=output_device(),
+                    device=device,
                 ) as stream:
                     self.speaking = True
                     duck("duck")
@@ -368,6 +391,10 @@ def load_in_background() -> None:
     State.speaker = Speaker(model)
     State.ready.set()
     faulthandler.cancel_dump_traceback_later()
+    try:
+        audio()
+    except Exception as error:  # speech is synthesized anyway; playback retries each time
+        log(f"no audio yet: {error!r}")
     log(f"ready in {time.monotonic() - started:.1f}s, providers {model.providers}")
 
 

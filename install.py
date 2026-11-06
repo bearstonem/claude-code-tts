@@ -78,12 +78,13 @@ PORTAUDIO_HELP = """PortAudio, which plays the audio, is not installed. Install 
 def check_audio() -> None:
     try:
         import sounddevice as sd
+
+        sd.query_devices(kind="output")
     except OSError:  # Linux without the PortAudio library (Windows and macOS bundle it)
         sys.exit(PORTAUDIO_HELP)
-    try:
-        sd.query_devices(kind="output")
-    except Exception:
-        print("Warning: no audio output device found; speech stays silent until there is one.")
+    except Exception as error:  # e.g. no sound server running yet, or no output device
+        print(f"Warning: no audio output right now ({error}).")
+        print("  Speech stays silent until there is one; nothing needs re-installing.")
 
 
 def find_gpu(name: str | None) -> str:
